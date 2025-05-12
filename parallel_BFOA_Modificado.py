@@ -5,15 +5,51 @@ import numpy as np
 from bacteria import bacteria
 from fastaReader import fastaReader
 
+
 def calcular_tumbo_adaptativo(iteracion_actual, iteraciones_totales, tumbo_inicial, fitness_max):
     """Tumbo adaptativo"""
     enfriamiento = 0.5 ** (iteracion_actual / iteraciones_totales)
-    reduccion_outlier = 1.0
+    reduccion_anomalia = 1.0
     if fitness_max > 500:  # Umbral ajustado
-        reduccion_outlier = max(0.01, 500 / fitness_max)  # Limita reducción mínima al 1%
+        reduccion_anomalia = max(0.01, 500 / fitness_max)  # Limita reducción mínima al 1%
     
-    tumbo_actual = tumbo_inicial * enfriamiento * reduccion_outlier
+    tumbo_actual = tumbo_inicial * enfriamiento * reduccion_anomalia
     return max(min(tumbo_actual, tumbo_inicial), 5)  # Asegura 5 ≤ tumbo ≤ tumbo_inicial
+
+def corregir_anomalia(poblacion, idx, secuencias, veryBest, operadorBacterial):
+    """
+    Corrige una bacteria con fitness anómalo y devuelve:
+    - tuple: (éxito: bool, nuevo_fitness: float)
+    """
+    try:
+        # 1. Preparar secuencia de respaldo (asegurando que sea lista)
+        if veryBest[0] is not None and veryBest[1] < 100:  # Usar veryBest si es válido
+            secuencia_respaldo = deepcopy(veryBest[2])
+        else:  # Usar secuencia original
+            secuencia_respaldo = deepcopy(secuencias[idx % len(secuencias)])
+        
+        if isinstance(secuencia_respaldo, str):
+            secuencia_respaldo = list(secuencia_respaldo)
+        
+        # 2. Aplicar corrección
+        poblacion[idx] = secuencia_respaldo
+        
+        # 3. Recalcular fitness específico para esta bacteria
+        operadorBacterial.creaGranListaPares([poblacion[idx]])
+        operadorBacterial.evaluaBlosum()
+        nuevo_fitness = operadorBacterial.tablaFitness[0]
+        
+        # 4. Validar que la corrección fue efectiva
+        if nuevo_fitness > 100:  # Si persiste el problema
+            raise ValueError("Fitness corregido sigue siendo anómalo")
+            
+        return (True, nuevo_fitness)
+        
+    except Exception as e:
+        print(f"Error en corrección: {str(e)}")
+        # Secuencia mínima de respaldo
+        poblacion[idx] = ['A','T','G','C']  # Secuencia de ADN mínima
+        return (False, 0)
 
 if __name__ == "__main__":
     # Parámetros iniciales
@@ -29,7 +65,8 @@ if __name__ == "__main__":
     wRep = 0.003  
     
     # Lectura de secuencias
-    secuencias = fastaReader().seqs
+    # Asegura que todas las secuencias sean listas
+    secuencias = [list(seq) if isinstance(seq, str) else seq for seq in fastaReader().seqs]
     names = fastaReader().names
     
     #hace todas las secuencias listas de caracteres
@@ -38,6 +75,7 @@ if __name__ == "__main__":
         secuencias[i] = list(secuencias[i])
         
         
+    
     numSec = len(secuencias)
     print(f"Número de secuencias: {numSec}")
 
@@ -48,6 +86,12 @@ if __name__ == "__main__":
     veryBest = [None, -np.inf, None]
     globalNFE = 0
     start_time = time.time()
+
+    # En la inicialización, verifica todas las bacterias
+    for i in range(len(poblacion)):
+        if not poblacion[i]:  # Si está vacía
+            poblacion[i] = deepcopy(secuencias[i % len(secuencias)])
+        
 
     for it in range(iteraciones):
         print(f"\n--- Iteración {it+1}/{iteraciones} ---")
@@ -89,11 +133,53 @@ if __name__ == "__main__":
         globalNFE += operadorBacterial.getNFE()
         bestIdx, bestFitness = operadorBacterial.obtieneBest(globalNFE)
         
-        if bestIdx is not None and bestFitness is not None:
-            print(f"Mejor fitness actual: {bestFitness:.2f}")
-            if bestFitness > veryBest[1]:
-                veryBest = [bestIdx, bestFitness, deepcopy(poblacion[bestIdx])]
-                print(f"Nuevo mejor global: {bestFitness:.2f}")
+        # Dentro del bucle principal, después de obtener bestFitness:
+
+        UMBRAL_FITNESS = 100  # Ajustar según necesidades
+
+        if bestFitness > UMBRAL_FITNESS:
+            print(f"\n¡ANOMALÍA DETECTADA! Fitness: {bestFitness}")
+            print(f"Corrigiendo bacteria {bestIdx}...")
+            
+            # Paso 1: Corregir la bacteria problemática
+            exito, nuevo_fitness = corregir_anomalia(poblacion, bestIdx, secuencias, veryBest, operadorBacterial)
+            
+            # Paso 2: Actualizar todas las estructuras de datos
+            if exito:
+                print(f"Corrección exitosa. Nuevo fitness: {nuevo_fitness}")
+                
+                # Actualizar tablaFitness completa
+                operadorBacterial.creaGranListaPares(poblacion)
+                operadorBacterial.evaluaBlosum()
+                operadorBacterial.creaTablaFitness()
+                
+                # Forzar actualización de bestFitness y veryBest
+                bestFitness = nuevo_fitness
+                if veryBest[1] > UMBRAL_FITNESS or nuevo_fitness > veryBest[1]:
+                    veryBest = [bestIdx, nuevo_fitness, deepcopy(poblacion[bestIdx])]
+            else:
+                print("¡Corrección falló! Descartando bacteria.")
+                bestFitness = 0
+                poblacion[bestIdx] = deepcopy(secuencias[bestIdx % len(secuencias)])  # Reset completo
+
+            # Debug detallado
+            print("\nEstado post-corrección:")
+            print(f"Bacteria {bestIdx}: {operadorBacterial.tablaFitness[bestIdx]}")
+            if bestIdx > 0:
+                print(f"Bacteria {bestIdx-1}: {operadorBacterial.tablaFitness[bestIdx-1]}")
+            if bestIdx < len(poblacion)-1:
+                print(f"Bacteria {bestIdx+1}: {operadorBacterial.tablaFitness[bestIdx+1]}")
+                
+                if bestIdx is not None and bestFitness is not None:
+                    print(f"Mejor fitness actual: {bestFitness:.2f}")
+                    if bestFitness > veryBest[1]:
+                        veryBest = [bestIdx, bestFitness, deepcopy(poblacion[bestIdx])]
+                        print(f"Nuevo mejor global: {bestFitness:.2f}")
+                        
+                if operadorBacterial.tablaFitness[bestIdx] > UMBRAL_FITNESS:
+                    print("¡Persiste anomalia! Aplicando corrección final...")
+                    bestFitness = corregir_anomalia(poblacion, bestIdx, secuencias, veryBest, operadorBacterial)
+                    operadorBacterial.tablaFitness[bestIdx] = bestFitness  # Actualiza tabla
         
         # 5. Reemplazo seguro
         if veryBest[0] is not None:
@@ -105,7 +191,6 @@ if __name__ == "__main__":
     print("\n--- Resultados Finales ---")
     if veryBest[0] is not None:
         print(f"Mejor fitness: {veryBest[1]:.2f}")
-        print(f"Mejor secuencia: {veryBest[2]}")
     else:
         print("No se encontraron soluciones válidas")
     print(f"Tiempo total: {time.time() - start_time:.2f} segundos")
